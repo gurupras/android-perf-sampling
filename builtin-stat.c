@@ -223,6 +223,7 @@ static void print_stat_ltd(int argc, const char **argv);
 static void print_stat(int argc, const char **argv);
 long get_file_size();
 void update_hook(struct perf_evsel *);
+void write_file();
 /* ANDROID_CHAANGE_END */
 
 struct perf_stat {
@@ -509,7 +510,35 @@ static int run_perf_stat(int argc __used, const char **argv)
 
 	if (forks) {
 		close(go_pipe[1]);
-		wait(&status);
+		struct timespec delay;
+		delay.tv_sec 	= 0;
+		delay.tv_nsec	= 0.85e6;
+		while(waitpid(child_pid, &status, WNOHANG) != child_pid) {
+			nanosleep(&delay,NULL);
+			update_stats(&walltime_nsecs_stats, (rdclock() - t0));
+			if (no_aggr) {
+				list_for_each_entry(counter, &evsel_list->entries, node) {
+					read_counter(counter);
+				}
+			} else {
+				list_for_each_entry(counter, &evsel_list->entries, node) {
+					read_counter_aggr(counter);
+				}
+			}
+//			print_stat(argc,argv);
+			print_stat_ltd(argc,argv);
+		}
+
+		if (no_aggr) {
+			list_for_each_entry(counter, &evsel_list->entries, node) {
+				perf_evsel__close_fd(counter, evsel_list->cpus->nr, 1);
+			}
+		} else {
+			list_for_each_entry(counter, &evsel_list->entries, node) {
+			perf_evsel__close_fd(counter, evsel_list->cpus->nr,
+			     evsel_list->threads->nr);
+			}
+		}
 	} else {
 		struct timespec delay;
 		delay.tv_sec 	= 0;
@@ -592,7 +621,6 @@ static void print_stalled_cycles_frontend(int cpu, struct perf_evsel *evsel __us
 {
 	double total, ratio = 0.0;
 	const char *color;
-
 	total = avg_stats(&runtime_cycles_stats[cpu]);
 
 	if (total)
@@ -1079,14 +1107,27 @@ long get_file_size() {
 	f_size				= ftell(perf_fp);
 	return f_size;
 }
-
+void write_file() {
+	fprintf(stdout,"Writing file due to SIGINT\n");
+	int stat_count 		= 0;
+	long f_size			= get_file_size();
+	fseek(perf_fp,0,SEEK_END);
+	fprintf(stdout,"\nfile size before SIGINT write  :%ld\n",f_size);
+	for(stat_count = 0; stat_count < event_stats.count; stat_count++) {
+		fwrite(&event_stats.event_stat[stat_count],sizeof(struct stats),1,perf_fp);
+	}
+	fprintf(stdout,"Data written\n");
+	fflush(perf_fp);
+	f_size			= get_file_size();
+	fclose(perf_fp);
+	fprintf(stdout,"\nfile size after SIGINT write  :%ld\n",f_size);
+}
 
 static volatile int signr = -1;
 
 static void skip_signal(int signo)
 {
-	if(child_pid == -1)
-		done = 1;
+	done = 1;
 
 	signr = signo;
 }
@@ -1256,9 +1297,9 @@ int cmd_stat(int argc, const char **argv, const char *prefix __used)
 	strcpy(perf_stat_hdr.stat_names[perf_stat_hdr.stat_count],"wallclock(time)");
 	perf_stat_hdr.stat_count++; //Need to add Time as a stat as well.
 //	fprintf(stdout,"hdr count :%d\n",perf_stat_hdr.stat_count);
-	fprintf(stdout,"STATS\t\t:\n");
-	for(loop_index = 0; loop_index < perf_stat_hdr.stat_count; loop_index++)
-		fprintf(stdout,"\t%s\n",perf_stat_hdr.stat_names[loop_index]);
+//	fprintf(stdout,"STATS\t\t:\n");
+//	for(loop_index = 0; loop_index < perf_stat_hdr.stat_count; loop_index++)
+//		fprintf(stdout,"\t%s\n",perf_stat_hdr.stat_names[loop_index]);
 	event_stats.event_stat = malloc(perf_stat_hdr.stat_count * 10 * 1024 * 1024);
 	file_descriptor = open(STDOUT_PATH, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR);
 	if(file_descriptor == -1)
@@ -1387,23 +1428,7 @@ int cmd_stat(int argc, const char **argv, const char *prefix __used)
 
 	if (status != -1) {
 		print_stat(argc, argv);
-		fprintf(stdout,"Writing file due to SIGINT\n");
-
-		int stat_count 		= 0;
-		long f_size			= get_file_size();
-		fseek(perf_fp,0,SEEK_END);
-		fprintf(stdout,"\nfile size before SIGINT write  :%ld\n",f_size);
-
-		for(stat_count = 0; stat_count < event_stats.count; stat_count++) {
-			fwrite(&event_stats.event_stat[stat_count],sizeof(struct stats),1,perf_fp);
-		}
-
-		fprintf(stdout,"Data written\n");
-		fflush(perf_fp);
-
-		f_size			= get_file_size();
-		fclose(perf_fp);
-		fprintf(stdout,"\nfile size after SIGINT write  :%ld\n",f_size);
+		write_file();
 	}
 out_free_fd:
 	list_for_each_entry(pos, &evsel_list->entries, node)
@@ -1417,4 +1442,3 @@ out:
 #endif
 	/* ANDROID_CHANGE_END */
 }
-
