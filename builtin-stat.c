@@ -203,6 +203,28 @@ struct stats
 	double n, mean, M2;
 };
 
+/* ANDROID_CHANGE_BEGIN */
+struct perf_stat_header {
+	int stat_count;
+	char **stat_names;
+};
+
+struct perf_event_stats {
+	long count;
+	struct stats *event_stat;
+};
+
+struct perf_stat_header perf_stat_hdr;
+struct perf_event_stats event_stats;
+char *STDOUT_PATH = "/data/sample_perf";
+int file_descriptor;
+FILE *perf_fp;
+static void print_stat_ltd(int argc, const char **argv);
+static void print_stat(int argc, const char **argv);
+long get_file_size();
+void update_hook(struct perf_evsel *);
+/* ANDROID_CHAANGE_END */
+
 struct perf_stat {
 	struct stats	  res_stats[3];
 };
@@ -224,9 +246,11 @@ static void update_stats(struct stats *stats, u64 val)
 	double delta;
 
 	stats->n++;
-	delta = val - stats->mean;
-	stats->mean += delta / stats->n;
-	stats->M2 += delta*(val - stats->mean);
+	stats->mean = val;
+	stats->M2	= 0;
+//	delta = val - stats->mean;
+//	stats->mean += delta / stats->n;
+//	stats->M2 += delta*(val - stats->mean);
 }
 
 static double avg_stats(struct stats *stats)
@@ -487,26 +511,36 @@ static int run_perf_stat(int argc __used, const char **argv)
 		close(go_pipe[1]);
 		wait(&status);
 	} else {
-		while(!done) sleep(1);
-	}
-
-	t1 = rdclock();
-
-	update_stats(&walltime_nsecs_stats, t1 - t0);
-
-	if (no_aggr) {
-		list_for_each_entry(counter, &evsel_list->entries, node) {
-			read_counter(counter);
-			perf_evsel__close_fd(counter, evsel_list->cpus->nr, 1);
+		struct timespec delay;
+		delay.tv_sec 	= 0;
+		delay.tv_nsec	= 0.85e6;
+		while(!done) {
+			nanosleep(&delay,NULL);
+			update_stats(&walltime_nsecs_stats, (rdclock() - t0));
+			if (no_aggr) {
+				list_for_each_entry(counter, &evsel_list->entries, node) {
+					read_counter(counter);
+				}
+			} else {
+				list_for_each_entry(counter, &evsel_list->entries, node) {
+					read_counter_aggr(counter);
+				}
+			}
+//			print_stat(argc,argv);
+			print_stat_ltd(argc,argv);
 		}
-	} else {
-		list_for_each_entry(counter, &evsel_list->entries, node) {
-			read_counter_aggr(counter);
+
+		if (no_aggr) {
+			list_for_each_entry(counter, &evsel_list->entries, node) {
+				perf_evsel__close_fd(counter, evsel_list->cpus->nr, 1);
+			}
+		} else {
+			list_for_each_entry(counter, &evsel_list->entries, node) {
 			perf_evsel__close_fd(counter, evsel_list->cpus->nr,
-					     evsel_list->threads->nr);
+			     evsel_list->threads->nr);
+			}
 		}
 	}
-
 	return WEXITSTATUS(status);
 }
 
@@ -998,6 +1032,55 @@ static void print_stat(int argc, const char **argv)
 	}
 }
 
+
+static void print_stat_ltd(int argc, const char **argv)
+{
+	struct perf_evsel *counter;
+	int i;
+	list_for_each_entry(counter, &evsel_list->entries, node)
+		update_hook(counter);
+}
+
+void update_hook(struct perf_evsel *counter) {
+	struct perf_stat *ps = counter->priv;
+	int scaled = counter->counts->scaled;
+	if (scaled == -1) {
+		if (counter->cgrp)
+			fprintf(stderr, "%s%s", csv_sep, counter->cgrp->name);
+		return;
+	}
+	/* PERF_MODIFICATION_BEGIN */
+	event_stats.event_stat[event_stats.count].M2 	= ps->res_stats[0].M2;
+	event_stats.event_stat[event_stats.count].mean	= ps->res_stats[0].mean;
+	event_stats.event_stat[event_stats.count].n 	= ps->res_stats[0].n;
+	event_stats.count++;
+	if(event_stats.count % (perf_stat_hdr.stat_count) == perf_stat_hdr.stat_count - 1) {
+		/*
+		 * Update the time and increment the count
+		 */
+		event_stats.event_stat[event_stats.count].M2 		= walltime_nsecs_stats.M2;
+		event_stats.event_stat[event_stats.count].mean		= walltime_nsecs_stats.mean;
+		event_stats.event_stat[event_stats.count].n 		= walltime_nsecs_stats.n;
+		event_stats.count++;
+	}
+
+	if (scaled) {
+		double avg_enabled, avg_running;
+		avg_enabled = avg_stats(&ps->res_stats[1]);
+		avg_running = avg_stats(&ps->res_stats[2]);
+	}
+	return;
+}
+
+long get_file_size() {
+	long f_size			= 0;
+	rewind(perf_fp);
+	fseek(perf_fp,0,SEEK_END);
+	f_size				= ftell(perf_fp);
+	return f_size;
+}
+
+
 static volatile int signr = -1;
 
 static void skip_signal(int signo)
@@ -1139,6 +1222,63 @@ static int add_default_attributes(void)
 
 int cmd_stat(int argc, const char **argv, const char *prefix __used)
 {
+
+/*	PERF_CHANGE_BEGIN */
+	int loop_index,k;
+
+	perf_stat_hdr.stat_count = 0;
+	perf_stat_hdr.stat_names = ( char** )malloc(10 * sizeof( char* ));
+	for(loop_index = 0; loop_index < 10; loop_index++) {
+		perf_stat_hdr.stat_names[loop_index] = (char*) malloc(50 * sizeof(char));
+		bzero(perf_stat_hdr.stat_names[loop_index],(50 * sizeof(char)));
+	}
+	for(loop_index = 0; loop_index < argc; loop_index++) {
+//		fprintf(stdout,"argv[%d] :%s\n",loop_index,argv[loop_index]);
+		if(strcmp(argv[loop_index],"-e") == 0) {
+			char events_list[512];
+//			fprintf(stdout,"events_list initialized\n");
+			strcpy(events_list,argv[++loop_index]);
+//			fprintf(stdout,"events copied to events_list\n%s\n",events_list);
+
+			char *rest; // to point to the rest of the string after token extraction.
+			char *token; // to point to the actual token returned.
+			char *ptr = events_list; // make ptr point to start of events_list
+//			loop till strtok_r returns NULL.
+			while( (token = strtok_r(ptr, ",", &rest)) ) {
+				strcpy(perf_stat_hdr.stat_names[perf_stat_hdr.stat_count],token);
+				perf_stat_hdr.stat_count++;
+//		    	fprintf(stdout,"%s stored in perf_stat_hdr\n",token);
+		    	ptr = rest;
+//				fprintf(stdout,"switched to next token :%s\n",token);
+	        }
+		}
+	}
+	strcpy(perf_stat_hdr.stat_names[perf_stat_hdr.stat_count],"wallclock(time)");
+	perf_stat_hdr.stat_count++; //Need to add Time as a stat as well.
+//	fprintf(stdout,"hdr count :%d\n",perf_stat_hdr.stat_count);
+	fprintf(stdout,"STATS\t\t:\n");
+	for(loop_index = 0; loop_index < perf_stat_hdr.stat_count; loop_index++)
+		fprintf(stdout,"\t%s\n",perf_stat_hdr.stat_names[loop_index]);
+	event_stats.event_stat = malloc(perf_stat_hdr.stat_count * 10 * 1024 * 1024);
+	file_descriptor = open(STDOUT_PATH, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR);
+	if(file_descriptor == -1)
+		fprintf(stdout,"Error obtaining file descriptor\n");
+//	else
+//		fprintf(stdout,"obtained file descriptor\n");
+		perf_fp = fdopen(file_descriptor,"a+");
+	fwrite(&perf_stat_hdr.stat_count,sizeof(int),1,perf_fp);
+	for(k = 0; k < perf_stat_hdr.stat_count; k++) {
+		int len = strlen(perf_stat_hdr.stat_names[k]);
+		fwrite(&len,1,sizeof(int),perf_fp);
+		fwrite(perf_stat_hdr.stat_names[k],len,1,perf_fp);
+	}
+	fflush(perf_fp);
+	fprintf(stdout,"Header written!\n");
+
+	/* PERF_CHANGE_END */
+
+
+
 	/* ANDROID_CHANGE_BEGIN */
 #ifndef __APPLE__
 	struct perf_evsel *pos;
@@ -1226,6 +1366,15 @@ int cmd_stat(int argc, const char **argv, const char *prefix __used)
 	signal(SIGABRT, skip_signal);
 
 	status = 0;
+
+
+
+
+
+
+
+
+
 	for (run_idx = 0; run_idx < run_count; run_idx++) {
 		if (run_count != 1 && verbose)
 			fprintf(stderr, "[ perf stat: executing run #%d ... ]\n", run_idx + 1);
@@ -1236,8 +1385,26 @@ int cmd_stat(int argc, const char **argv, const char *prefix __used)
 		status = run_perf_stat(argc, argv);
 	}
 
-	if (status != -1)
+	if (status != -1) {
 		print_stat(argc, argv);
+		fprintf(stdout,"Writing file due to SIGINT\n");
+
+		int stat_count 		= 0;
+		long f_size			= get_file_size();
+		fseek(perf_fp,0,SEEK_END);
+		fprintf(stdout,"\nfile size before SIGINT write  :%ld\n",f_size);
+
+		for(stat_count = 0; stat_count < event_stats.count; stat_count++) {
+			fwrite(&event_stats.event_stat[stat_count],sizeof(struct stats),1,perf_fp);
+		}
+
+		fprintf(stdout,"Data written\n");
+		fflush(perf_fp);
+
+		f_size			= get_file_size();
+		fclose(perf_fp);
+		fprintf(stdout,"\nfile size after SIGINT write  :%ld\n",f_size);
+	}
 out_free_fd:
 	list_for_each_entry(pos, &evsel_list->entries, node)
 		perf_evsel__free_stat_priv(pos);
@@ -1250,3 +1417,4 @@ out:
 #endif
 	/* ANDROID_CHANGE_END */
 }
+
