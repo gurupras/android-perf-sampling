@@ -1,6 +1,12 @@
 /*
  * builtin-stat.c
  *
+ * Need to correct errors that occur when a counter was not counted for - a particular sample/ all samples
+ * Need to fix collection of statistics over multiple programmed runs
+ *
+ *
+ *
+ *
  * Builtin stat command: Give a precise performance counters summary
  * overview about any workload, CPU or specific PID.
  *
@@ -203,15 +209,20 @@ struct stats
 	double n, mean, M2;
 };
 
+struct my_stats {
+	double val;
+};
+
 /* ANDROID_CHANGE_BEGIN */
 struct perf_stat_header {
+	int version;
 	int stat_count;
 	char **stat_names;
 };
 
 struct perf_event_stats {
 	long count;
-	struct stats *event_stat;
+	struct my_stats *event_stat;
 };
 
 struct perf_stat_header perf_stat_hdr;
@@ -1077,18 +1088,33 @@ void update_hook(struct perf_evsel *counter) {
 			fprintf(stderr, "%s%s", csv_sep, counter->cgrp->name);
 		return;
 	}
+	int i;
+	char name[50];
+	strcpy(name,event_name(counter));
+	for(i = 0; i < perf_stat_hdr.stat_count; i++) {
+		if(strcmp(perf_stat_hdr.stat_names[i],name) == 0) {
+			break;
+		}
+	}
 	/* PERF_MODIFICATION_BEGIN */
-	event_stats.event_stat[event_stats.count].M2 	= ps->res_stats[0].M2;
-	event_stats.event_stat[event_stats.count].mean	= ps->res_stats[0].mean;
-	event_stats.event_stat[event_stats.count].n 	= ps->res_stats[0].n;
+//	event_stats.event_stat[event_stats.count].M2 	= ps->res_stats[0].M2;
+//	event_stats.event_stat[event_stats.count].mean	= ps->res_stats[0].mean;
+//	event_stats.event_stat[event_stats.count].n 	= ps->res_stats[0].n;
+
+//	The line below is to be used only when event_stats.event_stat is set to be of struct my_stats (Contains only the raw counter value)
+
+	event_stats.event_stat[event_stats.count].val	= ps->res_stats[0].mean;
 	event_stats.count++;
 	if(event_stats.count % (perf_stat_hdr.stat_count) == perf_stat_hdr.stat_count - 1) {
 		/*
 		 * Update the time and increment the count
 		 */
-		event_stats.event_stat[event_stats.count].M2 		= walltime_nsecs_stats.M2;
-		event_stats.event_stat[event_stats.count].mean		= walltime_nsecs_stats.mean;
-		event_stats.event_stat[event_stats.count].n 		= walltime_nsecs_stats.n;
+//		event_stats.event_stat[event_stats.count].M2 		= walltime_nsecs_stats.M2;
+//		event_stats.event_stat[event_stats.count].mean		= walltime_nsecs_stats.mean;
+//		event_stats.event_stat[event_stats.count].n 		= walltime_nsecs_stats.n;
+
+//		The line below is to be used only when event_stats.event_stat is set to be of struct my_stats (Contains only the raw counter value)
+		event_stats.event_stat[event_stats.count].val	= walltime_nsecs_stats.mean;
 		event_stats.count++;
 	}
 
@@ -1114,7 +1140,7 @@ void write_file() {
 	fseek(perf_fp,0,SEEK_END);
 	fprintf(stdout,"\nfile size before SIGINT write  :%ld\n",f_size);
 	for(stat_count = 0; stat_count < event_stats.count; stat_count++) {
-		fwrite(&event_stats.event_stat[stat_count],sizeof(struct stats),1,perf_fp);
+		fwrite(&event_stats.event_stat[stat_count],sizeof(event_stats.event_stat[0]),1,perf_fp);
 	}
 	fprintf(stdout,"Data written\n");
 	fflush(perf_fp);
@@ -1300,13 +1326,21 @@ int cmd_stat(int argc, const char **argv, const char *prefix __used)
 //	fprintf(stdout,"STATS\t\t:\n");
 //	for(loop_index = 0; loop_index < perf_stat_hdr.stat_count; loop_index++)
 //		fprintf(stdout,"\t%s\n",perf_stat_hdr.stat_names[loop_index]);
-	event_stats.event_stat = malloc(perf_stat_hdr.stat_count * 10 * 1024 * 1024);
+	event_stats.event_stat = malloc(perf_stat_hdr.stat_count * 40 * 1024 * 1024);
 	file_descriptor = open(STDOUT_PATH, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR);
 	if(file_descriptor == -1)
 		fprintf(stdout,"Error obtaining file descriptor\n");
 //	else
 //		fprintf(stdout,"obtained file descriptor\n");
-		perf_fp = fdopen(file_descriptor,"a+");
+	perf_fp = fdopen(file_descriptor,"a+");
+
+//	The following line should be commented if the default struct stats is being used for event_stats.event_stat
+	if(sizeof(event_stats.event_stat[0]) == sizeof(double))
+		perf_stat_hdr.version = 100;
+	else
+		perf_stat_hdr.version = 0;
+
+	fwrite(&perf_stat_hdr.version,sizeof(int),1,perf_fp);
 	fwrite(&perf_stat_hdr.stat_count,sizeof(int),1,perf_fp);
 	for(k = 0; k < perf_stat_hdr.stat_count; k++) {
 		int len = strlen(perf_stat_hdr.stat_names[k]);
