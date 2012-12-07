@@ -227,6 +227,7 @@ struct perf_event_stats {
 
 struct perf_stat_header perf_stat_hdr;
 struct perf_event_stats event_stats;
+u64 **per_thread_count;
 char *STDOUT_PATH = "/data/sample_perf";
 int file_descriptor;
 FILE *perf_fp;
@@ -379,15 +380,37 @@ static int read_counter_aggr(struct perf_evsel *counter)
 {
 	struct perf_stat *ps = counter->priv;
 	u64 *count = counter->counts->aggr.values;
-	int i;
+	int i,j;
 
-	if (__perf_evsel__read(counter, evsel_list->cpus->nr,
-			       evsel_list->threads->nr, scale) < 0)
+	const char *name = event_name(counter);
+
+	int stat_index;
+	for(stat_index = 0; stat_index < perf_stat_hdr.stat_count; stat_index++)
+		if(strcmp(perf_stat_hdr.stat_names[stat_index],name) == 0)
+			break;
+
+//	fprintf(stdout,"\n\nupdating stat :%s\n",perf_stat_hdr.stat_names[stat_index]);
+	if (__perf_evsel__read_per_thread(counter, evsel_list->cpus->nr,
+			       evsel_list->threads->nr, scale, per_thread_count[stat_index]) < 0)
 		return -1;
+
+	int cpus 	= evsel_list->cpus->nr;
+	int threads = evsel_list->threads->nr;
+
+//	fprintf(stdout,"count[0] :%llu\n\n",count[0]);
+	int cpu_index,thread_index;
+	for(cpu_index = 0; cpu_index < cpus; cpu_index++) {
+//		fprintf(stdout,"cpu :%d\n",cpu_index);
+		for(thread_index = 0; thread_index < threads; thread_index++) {
+//			fprintf(stdout,"\tthread :%d\tval :%llu\n",thread_index ,
+//					per_thread_count[stat_index][(cpu_index * thread_index) + thread_index]);
+		}
+//		fprintf(stdout,"\n\n");
+	}
 
 	for (i = 0; i < 3; i++)
 		update_stats(&ps->res_stats[i], count[i]);
-
+//	fprintf(stdout,"n :%f\n",ps->res_stats[0].n);
 	if (verbose) {
 		fprintf(stderr, "%s: %" PRIu64 " %" PRIu64 " %" PRIu64 "\n",
 			event_name(counter), count[0], count[1], count[2]);
@@ -523,7 +546,7 @@ static int run_perf_stat(int argc __used, const char **argv)
 		close(go_pipe[1]);
 		struct timespec delay;
 		delay.tv_sec 	= 0;
-		delay.tv_nsec	= 0.85e6;
+		delay.tv_nsec	= 0.85e7;
 		while(waitpid(child_pid, &status, WNOHANG) != child_pid) {
 			nanosleep(&delay,NULL);
 			update_stats(&walltime_nsecs_stats, (rdclock() - t0));
@@ -1088,24 +1111,44 @@ void update_hook(struct perf_evsel *counter) {
 			fprintf(stderr, "%s%s", csv_sep, counter->cgrp->name);
 		return;
 	}
-	int i;
+	/* PERF_MODIFICATION_BEGIN */
+
+	int stat_index;
 	char name[50];
 	strcpy(name,event_name(counter));
-	for(i = 0; i < perf_stat_hdr.stat_count; i++) {
-		if(strcmp(perf_stat_hdr.stat_names[i],name) == 0) {
+	for(stat_index = 0; stat_index < perf_stat_hdr.stat_count; stat_index++) {
+		if(strcmp(perf_stat_hdr.stat_names[stat_index],name) == 0) {
 			break;
 		}
 	}
-	/* PERF_MODIFICATION_BEGIN */
+
+
+	/* The following code is for using per-thread stats. */
+	u64 sum = 0;
+
+	int cpu,thread;
+	int ncpus = evsel_list->cpus->nr;
+	int nthreads = evsel_list->threads->nr;
+
+	for(cpu = 0; cpu < ncpus; cpu++) {
+		for(thread = 0; thread < nthreads; thread++) {
+			sum += per_thread_count[stat_index][(cpu * thread) + thread];
+		}
+	}
+//	fprintf(stdout,"stat :%s\n",perf_stat_hdr.stat_names[stat_index]);
+//	fprintf(stdout,"sum :%llu\n",sum);
+	event_stats.event_stat[event_stats.count].val	= sum;
+	event_stats.count++;
+
 //	event_stats.event_stat[event_stats.count].M2 	= ps->res_stats[0].M2;
 //	event_stats.event_stat[event_stats.count].mean	= ps->res_stats[0].mean;
 //	event_stats.event_stat[event_stats.count].n 	= ps->res_stats[0].n;
 
 //	The line below is to be used only when event_stats.event_stat is set to be of struct my_stats (Contains only the raw counter value)
 
-	event_stats.event_stat[event_stats.count].val	= ps->res_stats[0].mean;
-	event_stats.count++;
-	if(event_stats.count % (perf_stat_hdr.stat_count) == perf_stat_hdr.stat_count - 1) {
+//	event_stats.event_stat[event_stats.count].val	= ps->res_stats[0].mean;
+//	event_stats.count++;
+	if( (event_stats.count % (perf_stat_hdr.stat_count)) == perf_stat_hdr.stat_count - 1) {
 		/*
 		 * Update the time and increment the count
 		 */
@@ -1428,6 +1471,23 @@ int cmd_stat(int argc, const char **argv, const char *prefix __used)
 		    perf_evsel__alloc_fd(pos, evsel_list->cpus->nr, evsel_list->threads->nr) < 0)
 			goto out_free_fd;
 	}
+
+
+	/* PERF_CHANGE_BEGIN	 */
+
+
+	/* We want to allocate space to store the per-thread values for all events
+	 * This helps us to verify whether modified perf stats is accurate
+	 */
+	per_thread_count = (u64 **) malloc(sizeof(u64) * perf_stat_hdr.stat_count);
+	for(loop_index = 0; loop_index < perf_stat_hdr.stat_count; loop_index++) {
+		per_thread_count[loop_index] = (u64 *)malloc(sizeof(u64) * evsel_list->cpus->nr *evsel_list->threads->nr);
+		bzero(per_thread_count[loop_index],(sizeof(u64) * evsel_list->cpus->nr *evsel_list->threads->nr));
+	}
+
+
+	/* PERF_CHANGE_END	*/
+
 
 	/*
 	 * We dont want to block the signals - that would cause

@@ -200,6 +200,59 @@ int __perf_evsel__read(struct perf_evsel *evsel,
 	return 0;
 }
 
+/* PERF_CHANGE_BEGIN */
+
+int __perf_evsel__read_per_thread(struct perf_evsel *evsel,
+		       int ncpus, int nthreads, bool scale, u64 *per_thread_count)
+{
+	size_t nv = scale ? 3 : 1;
+	int cpu, thread;
+	struct perf_counts_values *aggr = &evsel->counts->aggr, count;
+
+	aggr->val = aggr->ena = aggr->run = 0;
+
+	for (cpu = 0; cpu < ncpus; cpu++) {
+//		fprintf(stdout , "cpu :%d\n" , cpu);
+		for (thread = 0; thread < nthreads; thread++) {
+			if (FD(evsel, cpu, thread) < 0)
+				continue;
+
+			if (readn(FD(evsel, cpu, thread),
+				  &count, nv * sizeof(u64)) < 0)
+				return -errno;
+//			if(count.val != 0) {
+//				fprintf(stdout , "\tthread :%d" , thread);
+//				fprintf(stdout , "\tcount :%llu\n" , count.val);
+//			}
+			per_thread_count[(cpu * thread) + thread] = count.val;
+			
+
+			aggr->val += count.val;
+			if (scale) {
+				aggr->ena += count.ena;
+				aggr->run += count.run;
+			}
+		}
+	}
+	
+
+	evsel->counts->scaled = 0;
+	if (scale) {
+		if (aggr->run == 0) {
+			evsel->counts->scaled = -1;
+			aggr->val = 0;
+			return 0;
+		}
+
+		if (aggr->run < aggr->ena) {
+			evsel->counts->scaled = 1;
+			aggr->val = (u64)((double)aggr->val * aggr->ena / aggr->run + 0.5);
+		}
+	} else
+		aggr->ena = aggr->run = 0;
+
+	return 0;
+}
 static int __perf_evsel__open(struct perf_evsel *evsel, struct cpu_map *cpus,
 			      struct thread_map *threads, bool group)
 {

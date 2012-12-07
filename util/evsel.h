@@ -164,4 +164,15 @@ static inline int perf_evsel__sample_size(struct perf_evsel *evsel)
 	return __perf_evsel__sample_size(evsel->attr.sample_type);
 }
 
+/* PERF_CHANGE_BEGIN */
+
+int __perf_evsel__read_per_thread(struct perf_evsel *evsel, int cpus, int threads,bool scale, u64 *per_thread_count);
+
+static inline int perf_evsel__read_per_thread(struct perf_evsel *evsel, int cpus, int threads, bool scale, u64 *per_thread_count) 
+{
+	return __perf_evsel__read_per_thread(evsel, cpus, threads, scale, per_thread_count);
+}
+
+/* PERF_CHANGE_END */
+
 #endif /* __PERF_EVSEL_H */
