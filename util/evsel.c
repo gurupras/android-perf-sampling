@@ -14,6 +14,8 @@
 #include "thread_map.h"
 
 #define FD(e, x, y) (*(int *)xyarray__entry(e->fd, x, y))
+//readn(FD(evsel, cpu, thread),&count, nv * sizeof(u64))
+
 
 int __perf_evsel__sample_size(u64 sample_type)
 {
@@ -235,7 +237,7 @@ int __perf_evsel__read_per_thread(struct perf_evsel *evsel,
 		}
 	}
 	
-
+	
 	evsel->counts->scaled = 0;
 	if (scale) {
 		if (aggr->run == 0) {

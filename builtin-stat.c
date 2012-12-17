@@ -231,10 +231,18 @@ u64 **per_thread_count;
 char *STDOUT_PATH = "/data/sample_perf";
 int file_descriptor;
 FILE *perf_fp;
-static void print_stat_ltd(int argc, const char **argv);
+
+struct 	perf_stat_header perf_stat_hdr;
+struct 	perf_event_stats event_stats;
+char 	*STDOUT_PATH = "/data/sample_perf";
+double 	*sample_time;
+int 	file_descriptor;
+FILE 	*perf_fp;
+
 static void print_stat(int argc, const char **argv);
 long get_file_size();
 void update_hook(struct perf_evsel *);
+void update_record(struct perf_evlist *);
 void write_file();
 /* ANDROID_CHAANGE_END */
 
@@ -376,8 +384,9 @@ static void update_shadow_stats(struct perf_evsel *counter, u64 *count)
  * Read out the results of a single counter:
  * aggregate counts across CPUs in system-wide mode
  */
-static int read_counter_aggr(struct perf_evsel *counter)
+static int read_counter_aggr(struct perf_evsel *counter, double start_time)
 {
+	fprintf(stdout,"\n\n");
 	struct perf_stat *ps = counter->priv;
 	u64 *count = counter->counts->aggr.values;
 	int i,j;
@@ -397,17 +406,17 @@ static int read_counter_aggr(struct perf_evsel *counter)
 	int cpus 	= evsel_list->cpus->nr;
 	int threads = evsel_list->threads->nr;
 
-//	fprintf(stdout,"count[0] :%llu\n\n",count[0]);
 	int cpu_index,thread_index;
 	for(cpu_index = 0; cpu_index < cpus; cpu_index++) {
-//		fprintf(stdout,"cpu :%d\n",cpu_index);
+		fprintf(stdout,"cpu :%d\n",cpu_index);
 		for(thread_index = 0; thread_index < threads; thread_index++) {
-//			fprintf(stdout,"\tthread :%d\tval :%llu\n",thread_index ,
-//					per_thread_count[stat_index][(cpu_index * thread_index) + thread_index]);
+			if(per_thread_count[stat_index][(cpu_index * thread_index) + thread_index] > 0)
+				fprintf(stdout,"\tthread :%d\tval :%llu\n",thread_index ,
+						per_thread_count[stat_index][(cpu_index * thread_index) + thread_index]);
 		}
 //		fprintf(stdout,"\n\n");
 	}
-
+	fprintf(stdout,"count[0] :%llu\n\n",count[0]);
 	for (i = 0; i < 3; i++)
 		update_stats(&ps->res_stats[i], count[i]);
 //	fprintf(stdout,"n :%f\n",ps->res_stats[0].n);
@@ -421,6 +430,13 @@ static int read_counter_aggr(struct perf_evsel *counter)
 	 */
 	update_shadow_stats(counter, count);
 
+
+	const char *name = event_name(counter);
+	for(i = 0; i < perf_stat_hdr.stat_count; i++) {
+		if(strcmp(perf_stat_hdr.stat_names[i], name) == 0)
+			break;
+	}
+	sample_time[i] = rdclock() - start_time;
 	return 0;
 }
 
@@ -542,11 +558,13 @@ static int run_perf_stat(int argc __used, const char **argv)
 	 */
 	t0 = rdclock();
 
+	struct timespec delay;
+	delay.tv_sec 	= 0;
+	delay.tv_nsec	= 0.85e6;
+
 	if (forks) {
 		close(go_pipe[1]);
-		struct timespec delay;
-		delay.tv_sec 	= 0;
-		delay.tv_nsec	= 0.85e7;
+
 		while(waitpid(child_pid, &status, WNOHANG) != child_pid) {
 			nanosleep(&delay,NULL);
 			update_stats(&walltime_nsecs_stats, (rdclock() - t0));
@@ -555,12 +573,15 @@ static int run_perf_stat(int argc __used, const char **argv)
 					read_counter(counter);
 				}
 			} else {
+				double start_time = rdclock();
 				list_for_each_entry(counter, &evsel_list->entries, node) {
-					read_counter_aggr(counter);
+					read_counter_aggr(counter, start_time);
 				}
 			}
+
+			update_record(evsel_list);
 //			print_stat(argc,argv);
-			print_stat_ltd(argc,argv);
+//			print_stat_ltd(argc,argv);
 		}
 
 		if (no_aggr) {
@@ -574,9 +595,6 @@ static int run_perf_stat(int argc __used, const char **argv)
 			}
 		}
 	} else {
-		struct timespec delay;
-		delay.tv_sec 	= 0;
-		delay.tv_nsec	= 0.85e6;
 		while(!done) {
 			nanosleep(&delay,NULL);
 			update_stats(&walltime_nsecs_stats, (rdclock() - t0));
@@ -585,12 +603,15 @@ static int run_perf_stat(int argc __used, const char **argv)
 					read_counter(counter);
 				}
 			} else {
+				double start_time = rdclock();
 				list_for_each_entry(counter, &evsel_list->entries, node) {
-					read_counter_aggr(counter);
+					read_counter_aggr(counter, start_time);
 				}
 			}
+
+			update_record(evsel_list);
 //			print_stat(argc,argv);
-			print_stat_ltd(argc,argv);
+//			print_stat_ltd(argc,argv);
 		}
 
 		if (no_aggr) {
@@ -1094,13 +1115,16 @@ static void print_stat(int argc, const char **argv)
 	}
 }
 
-
-static void print_stat_ltd(int argc, const char **argv)
-{
+void update_record(struct perf_evlist *evsel_list) {
 	struct perf_evsel *counter;
-	int i;
-	list_for_each_entry(counter, &evsel_list->entries, node)
+	list_for_each_entry(counter, &evsel_list->entries, node) {
 		update_hook(counter);
+	}
+
+	event_stats.event_stat[event_stats.count].val = walltime_nsecs_stats.mean;
+	event_stats.count++;
+	event_stats.event_stat[event_stats.count].val = syscall(__NR_sys_cpufreq, 0);
+	event_stats.count++;
 }
 
 void update_hook(struct perf_evsel *counter) {
@@ -1111,7 +1135,10 @@ void update_hook(struct perf_evsel *counter) {
 			fprintf(stderr, "%s%s", csv_sep, counter->cgrp->name);
 		return;
 	}
+
 	/* PERF_MODIFICATION_BEGIN */
+
+
 
 	int stat_index;
 	char name[50];
@@ -1121,6 +1148,7 @@ void update_hook(struct perf_evsel *counter) {
 			break;
 		}
 	}
+
 
 
 	/* The following code is for using per-thread stats. */
@@ -1135,31 +1163,11 @@ void update_hook(struct perf_evsel *counter) {
 			sum += per_thread_count[stat_index][(cpu * thread) + thread];
 		}
 	}
-//	fprintf(stdout,"stat :%s\n",perf_stat_hdr.stat_names[stat_index]);
-//	fprintf(stdout,"sum :%llu\n",sum);
+
 	event_stats.event_stat[event_stats.count].val	= sum;
 	event_stats.count++;
-
-//	event_stats.event_stat[event_stats.count].M2 	= ps->res_stats[0].M2;
-//	event_stats.event_stat[event_stats.count].mean	= ps->res_stats[0].mean;
-//	event_stats.event_stat[event_stats.count].n 	= ps->res_stats[0].n;
-
-//	The line below is to be used only when event_stats.event_stat is set to be of struct my_stats (Contains only the raw counter value)
-
-//	event_stats.event_stat[event_stats.count].val	= ps->res_stats[0].mean;
-//	event_stats.count++;
-	if( (event_stats.count % (perf_stat_hdr.stat_count)) == perf_stat_hdr.stat_count - 1) {
-		/*
-		 * Update the time and increment the count
-		 */
-//		event_stats.event_stat[event_stats.count].M2 		= walltime_nsecs_stats.M2;
-//		event_stats.event_stat[event_stats.count].mean		= walltime_nsecs_stats.mean;
-//		event_stats.event_stat[event_stats.count].n 		= walltime_nsecs_stats.n;
-
-//		The line below is to be used only when event_stats.event_stat is set to be of struct my_stats (Contains only the raw counter value)
-		event_stats.event_stat[event_stats.count].val	= walltime_nsecs_stats.mean;
-		event_stats.count++;
-	}
+	event_stats.event_stat[event_stats.count].val	= sample_time[stat_index];
+	event_stats.count++;
 
 	if (scaled) {
 		double avg_enabled, avg_running;
@@ -1363,25 +1371,20 @@ int cmd_stat(int argc, const char **argv, const char *prefix __used)
 	        }
 		}
 	}
+
+//	Need to add Time as a stat as well.
 	strcpy(perf_stat_hdr.stat_names[perf_stat_hdr.stat_count],"wallclock(time)");
-	perf_stat_hdr.stat_count++; //Need to add Time as a stat as well.
-//	fprintf(stdout,"hdr count :%d\n",perf_stat_hdr.stat_count);
-//	fprintf(stdout,"STATS\t\t:\n");
-//	for(loop_index = 0; loop_index < perf_stat_hdr.stat_count; loop_index++)
-//		fprintf(stdout,"\t%s\n",perf_stat_hdr.stat_names[loop_index]);
-	event_stats.event_stat = malloc(perf_stat_hdr.stat_count * 40 * 1024 * 1024);
-	file_descriptor = open(STDOUT_PATH, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR);
+	perf_stat_hdr.stat_count++;
+	event_stats.event_stat 	= malloc(perf_stat_hdr.stat_count * 40 * 1024 * 1024);
+	sample_time				= malloc(sizeof(double) * perf_stat_hdr.stat_count);
+	file_descriptor 		= open(STDOUT_PATH, O_CREAT | O_RDWR | O_TRUNC, S_IRUSR | S_IWUSR);
 	if(file_descriptor == -1)
 		fprintf(stdout,"Error obtaining file descriptor\n");
-//	else
-//		fprintf(stdout,"obtained file descriptor\n");
-	perf_fp = fdopen(file_descriptor,"a+");
+	perf_fp 				= fdopen(file_descriptor,"a+");
 
-//	The following line should be commented if the default struct stats is being used for event_stats.event_stat
-	if(sizeof(event_stats.event_stat[0]) == sizeof(double))
-		perf_stat_hdr.version = 100;
-	else
-		perf_stat_hdr.version = 0;
+
+
+	perf_stat_hdr.version = 200;
 
 	fwrite(&perf_stat_hdr.version,sizeof(int),1,perf_fp);
 	fwrite(&perf_stat_hdr.stat_count,sizeof(int),1,perf_fp);
@@ -1501,6 +1504,8 @@ int cmd_stat(int argc, const char **argv, const char *prefix __used)
 	signal(SIGABRT, skip_signal);
 
 	status = 0;
+
+
 
 
 
